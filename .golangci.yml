@@ -6,3 +6,15 @@ linters:
     - misspell
     - unconvert
     - unparam
+  settings:
+    errcheck:
+      # Writes to stdout/stderr and deferred Body.Close: nothing useful to do
+      # with the error.
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - io.WriteString
+        - (*text/tabwriter.Writer).Flush
+        - (io.Closer).Close
+        - (io.ReadCloser).Close

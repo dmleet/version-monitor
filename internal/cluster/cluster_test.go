@@ -136,11 +136,6 @@ func TestInventory(t *testing.T) {
 	}
 
 	wantHR := []HelmRelease{
-		{"traefik", "traefik", "traefik", "39.x", "39.0.2", "v3.6.1", "HelmRepository", "traefik", "flux-system"},
-		{"metallb", "metallb", "metallb", "0.15.x", "", "", "HelmRepository", "metallb", "metallb"},
-	}
-	// Field order of HelmRelease is Namespace, Name, ...; build explicitly.
-	wantHR = []HelmRelease{
 		{Namespace: "traefik", Name: "traefik", Chart: "traefik", SpecVersion: "39.x", ChartVersion: "39.0.2", AppVersion: "v3.6.1",
 			SourceKind: "HelmRepository", SourceName: "traefik", SourceNamespace: "flux-system"},
 		{Namespace: "metallb", Name: "metallb", Chart: "metallb", SpecVersion: "0.15.x",

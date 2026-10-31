@@ -75,7 +75,7 @@ func (c *Client) Index(ctx context.Context, repoURL string) (*Index, error) {
 	for name, list := range raw.Entries {
 		es := make([]Entry, 0, len(list))
 		for _, r := range list {
-			es = append(es, Entry{Version: r.Version, AppVersion: r.AppVersion})
+			es = append(es, Entry(r))
 		}
 		idx.entries[name] = es
 	}
