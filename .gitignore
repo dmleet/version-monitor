@@ -1,0 +1,6 @@
+/version-monitor
+/version-monitor.exe
+/dist/
+/.idea/
+*.test
+coverage.out
