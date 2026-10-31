@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -42,12 +43,15 @@ type fakeCluster struct {
 func (f fakeCluster) Inventory(context.Context) (*cluster.Inventory, error) { return f.inv, f.err }
 
 type fakeRegistry struct {
+	mu    sync.Mutex
 	tags  map[string][]string
 	calls map[string]int
 }
 
 func (f *fakeRegistry) Tags(_ context.Context, repo string) ([]string, error) {
+	f.mu.Lock()
 	f.calls[repo]++
+	f.mu.Unlock()
 	t, ok := f.tags[repo]
 	if !ok {
 		return nil, errors.New("registry down for " + repo)
@@ -56,12 +60,15 @@ func (f *fakeRegistry) Tags(_ context.Context, repo string) ([]string, error) {
 }
 
 type fakeHelm struct {
+	mu    sync.Mutex
 	srv   *httptest.Server
 	calls int
 }
 
 func (f *fakeHelm) Index(ctx context.Context, url string) (*helmindex.Index, error) {
+	f.mu.Lock()
 	f.calls++
+	f.mu.Unlock()
 	return (&helmindex.Client{HTTP: f.srv.Client()}).Index(ctx, f.srv.URL+"/"+strings.TrimPrefix(url, "https://"))
 }
 
