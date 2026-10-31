@@ -29,6 +29,10 @@ type release struct {
 
 // Releases returns tag names of releases that are neither draft nor
 // prerelease, in API order (newest first). One request, no pagination.
+// maxBody bounds a releases response: 100 releases with full notes and
+// asset lists can exceed 10 MB (siderolabs/talos does).
+const maxBody = 64 << 20
+
 func (c *Client) Releases(ctx context.Context, repo string) ([]string, error) {
 	base := c.BaseURL
 	if base == "" {
@@ -67,7 +71,7 @@ func (c *Client) Releases(ctx context.Context, repo string) ([]string, error) {
 		return nil, fmt.Errorf("github: GET %s: unexpected HTTP status %d", u, resp.StatusCode)
 	}
 	var rels []release
-	if err := json.NewDecoder(resp.Body).Decode(&rels); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxBody)).Decode(&rels); err != nil {
 		return nil, fmt.Errorf("github: decode %s (HTTP %d): %w", u, resp.StatusCode, err)
 	}
 	tags := make([]string, 0, len(rels))

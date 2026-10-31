@@ -90,13 +90,25 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	for k, v := range counts {
 		ch <- prometheus.MustNewConstMetric(descComponents, prometheus.GaugeValue, v, k[0], k[1])
 	}
+	eolSeen := map[[5]string]bool{}
+	eolErrors := 0.0
 	for _, e := range s.EOL {
-		if e.Err != nil || !e.HasEOL {
+		if e.Err != nil {
+			eolErrors++
 			continue
 		}
+		if !e.HasEOL {
+			continue
+		}
+		key := [5]string{e.Product, e.Cycle, string(e.Kind), e.Namespace, e.Name}
+		if eolSeen[key] {
+			continue // a duplicate label set would fail the whole scrape
+		}
+		eolSeen[key] = true
 		ch <- prometheus.MustNewConstMetric(descEOL, prometheus.GaugeValue, e.Days(s.FinishedAt),
 			e.Product, e.Cycle, string(e.Kind), e.Namespace, e.Name)
 	}
+	ch <- prometheus.MustNewConstMetric(descComponents, prometheus.GaugeValue, eolErrors, "eol", "error")
 	for src, ok := range s.CheckSuccess {
 		v := 0.0
 		if ok {

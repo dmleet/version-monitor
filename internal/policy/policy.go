@@ -102,8 +102,9 @@ func Line(v Version, unit config.Unit) []int {
 	return []int{v.Nums[0], v.Nums[1]}
 }
 
-// cmp compares two int slices lexicographically; a shorter prefix is less.
-func cmp(a, b []int) int {
+// Compare orders two versions' digit runs lexicographically; a shorter
+// prefix sorts first. Exported so callers rank versions the same way.
+func Compare(a, b []int) int {
 	for i := 0; i < len(a) && i < len(b); i++ {
 		if a[i] != b[i] {
 			if a[i] < b[i] {
@@ -171,22 +172,17 @@ func LinesBehind(in Input) Outcome {
 	if len(cands) == 0 {
 		return Outcome{Status: model.StatusNoMatch, Pinned: pinned}
 	}
-	sort.SliceStable(cands, func(i, j int) bool { return cmp(cands[i].v.Nums, cands[j].v.Nums) < 0 })
+	sort.SliceStable(cands, func(i, j int) bool { return Compare(cands[i].v.Nums, cands[j].v.Nums) < 0 })
 
 	newer := map[string]bool{}
-	var newest []int
 	for _, c := range cands {
-		l := Line(c.v, in.Unit)
-		if cmp(l, curLine) > 0 {
+		if l := Line(c.v, in.Unit); Compare(l, curLine) > 0 {
 			newer[lineKey(l)] = true
-		}
-		if cmp(l, newest) >= 0 {
-			newest = l
 		}
 	}
 	best := cands[len(cands)-1]
 	latest := best.raw
-	if cmp(best.v.Nums, cur.Nums) <= 0 {
+	if Compare(best.v.Nums, cur.Nums) <= 0 {
 		latest = in.Current
 	}
 	return Outcome{Status: model.StatusOK, Latest: latest, Lines: len(newer), Pinned: pinned}
@@ -214,8 +210,11 @@ func StableSemver(s string) bool { return stableSemver.MatchString(s) }
 // ("17" for postgresql, "8.1" for valkey, "1.35" for kubernetes), and the
 // running version carries suffixes we must ignore ("13.2.5-distroless",
 // "16.11-alpine3.23", "v1.35.10"), so the comparison is on digit runs.
+//
+// Only the leading dotted number of the version takes part: "8-alpine3.21"
+// is [8], not [8, 3, 21], so a variant suffix can never match a cycle.
 func MatchCycle(version string, cycles []model.Cycle) (model.Cycle, bool) {
-	v := Parse(strings.TrimPrefix(version, "v"))
+	v := Parse(leadingNumber.FindString(strings.TrimPrefix(version, "v")))
 	var best model.Cycle
 	bestLen := 0
 	for _, c := range cycles {
@@ -223,12 +222,14 @@ func MatchCycle(version string, cycles []model.Cycle) (model.Cycle, bool) {
 		if len(cn) == 0 || len(cn) > len(v.Nums) || len(cn) <= bestLen {
 			continue
 		}
-		if cmp(cn, v.Nums[:len(cn)]) == 0 {
+		if Compare(cn, v.Nums[:len(cn)]) == 0 {
 			best, bestLen = c, len(cn)
 		}
 	}
 	return best, bestLen > 0
 }
+
+var leadingNumber = regexp.MustCompile(`^\d+(\.\d+)*`)
 
 // NormaliseVersion strips a leading "v" and any "@digest" from a version
 // string before cycle matching or display.

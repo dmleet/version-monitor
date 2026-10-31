@@ -42,6 +42,10 @@ type rawIndex struct {
 
 // Index fetches <repoURL>/index.yaml (repoURL with or without a trailing
 // slash). The caller fetches each repo once per run and reuses the Index.
+// maxBody bounds an index.yaml read; the largest public index we use is
+// ~7 MB.
+const maxBody = 64 << 20
+
 func (c *Client) Index(ctx context.Context, repoURL string) (*Index, error) {
 	url := strings.TrimRight(repoURL, "/") + "/index.yaml"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -68,7 +72,7 @@ func (c *Client) Index(ctx context.Context, repoURL string) (*Index, error) {
 		return nil, fmt.Errorf("helmindex: GET %s: unexpected HTTP status %d", url, resp.StatusCode)
 	}
 	var raw rawIndex
-	if err := yaml.NewDecoder(resp.Body).Decode(&raw); err != nil && !errors.Is(err, io.EOF) {
+	if err := yaml.NewDecoder(io.LimitReader(resp.Body, maxBody)).Decode(&raw); err != nil && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("helmindex: decode %s (HTTP %d): %w", url, resp.StatusCode, err)
 	}
 	idx := &Index{entries: make(map[string][]Entry, len(raw.Entries))}

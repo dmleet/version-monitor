@@ -48,6 +48,9 @@ type Source struct {
 	HelmRepoName string
 	HelmRepoURL  string
 	Chart        string
+	// ChartRef is the kind of a HelmRelease's spec.chartRef when it uses
+	// one instead of a HelmRepository source (unsupported; reported).
+	ChartRef string
 	// Image (normalised repository, no tag/digest) for KindImage.
 	Image string
 	// GitHubRepo ("owner/name") for KindTalos / KindFlux.

@@ -11,7 +11,7 @@ dashboards are left to Prometheus, Alertmanager and Grafana.
 | Kind | Current version from | Newer versions from |
 | --- | --- | --- |
 | Flux `HelmRelease` | `.status.history[0].chartVersion` | the `HelmRepository`'s `index.yaml` (HTTP repos; OCI is reported as an error) |
-| Container image | tag on every `Deployment`, `StatefulSet`, `DaemonSet`, `CronJob` container and initContainer | the registry's tag list: Docker Hub, quay.io, and any OCI registry with the anonymous bearer flow (ghcr.io, lscr.io, nvcr.io, registry.k8s.io) |
+| Container image | tag on every `Deployment`, `StatefulSet`, `DaemonSet`, `CronJob` container and initContainer, and the image of every CloudNativePG `Cluster` (its pods have no workload controller) | the registry's tag list: Docker Hub, quay.io, and any OCI registry with the anonymous bearer flow (ghcr.io, lscr.io, nvcr.io, registry.k8s.io) |
 | Kubernetes | lowest `kubeletVersion` across nodes | endoflife.date `kubernetes` cycles |
 | Talos | lowest `Talos (vX.Y.Z)` in node `osImage` | GitHub releases of `siderolabs/talos` |
 | Flux | `app.kubernetes.io/version` label on the `flux-system` controllers | GitHub releases of `fluxcd/flux2` |
@@ -87,12 +87,21 @@ overrides:                                    # glob → settings; longer keys w
 
 Override keys are globs (`*` matches anything, including `/`) tested against
 the component's name, `namespace/name`, and for images the repository as
-written in the manifest (`lscr.io/...` stays `lscr.io/...`). Image names are
+written in the manifest (`lscr.io/...` stays `lscr.io/...`). Keys are not
+kind-aware: `postgres` matches an image repository *and* a HelmRelease of
+that name. When several keys match, the longest wins field by field.
+`pin: major` with `unit: major` always yields 0 lines (useful to keep the
+dashboard row while never alerting). Image names are
 normalised: `docker.io/library/redis` is `redis`, `docker.io/grafana/grafana`
 is `grafana/grafana`.
 
 `tag_regex` must define a named group `v`; only tags matching the regex are
 considered, and the running tag must match too or the component is skipped.
+
+`github_releases: owner/repo` takes an image's candidates from that repo's
+non-draft, non-prerelease release tags instead of the registry — one request
+instead of paging a registry with thousands of tags (ghcr.io rate-limits
+those). `{name}` is replaced by the image's last path segment.
 
 ## Running
 
@@ -118,7 +127,11 @@ and `helmrepositories.source.toolkit.fluxcd.io`. Nothing else, and no Secrets.
 
 Outbound calls, all anonymous and read-only: the chart repositories, the
 registries' tag APIs (never a pull), `endoflife.date`, `api.github.com`.
-A run against ~60 components takes a few seconds.
+GET requests are retried twice on 429/5xx with `Retry-After` honoured.
+Registry tag lists stop with an error (not a silent cut) past 30 pages;
+bodies are bounded. A run against ~60 components takes a few seconds; the
+chart indexes are decoded one at a time to cap memory (~80 MB for a 6.6 MB
+index).
 
 ## Image
 

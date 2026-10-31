@@ -27,6 +27,7 @@ import (
 	"github.com/dmleet/version-monitor/internal/endoflife"
 	"github.com/dmleet/version-monitor/internal/github"
 	"github.com/dmleet/version-monitor/internal/helmindex"
+	"github.com/dmleet/version-monitor/internal/httpx"
 	"github.com/dmleet/version-monitor/internal/metrics"
 	"github.com/dmleet/version-monitor/internal/model"
 	"github.com/dmleet/version-monitor/internal/monitor"
@@ -74,7 +75,9 @@ func main() {
 		os.Exit(2)
 	}
 
-	httpc := &http.Client{Timeout: 60 * time.Second}
+	// One retry on 429/5xx with Retry-After honoured: a single transient
+	// error must not mark a source failed for a whole 6h interval.
+	httpc := httpx.NewClient(60*time.Second, 2, 30*time.Second)
 	gh := &github.Client{HTTP: httpc, BaseURL: github.DefaultBaseURL}
 	if tok := os.Getenv("GITHUB_TOKEN"); tok != "" {
 		gh.Token = strings.TrimSpace(tok)
@@ -151,7 +154,11 @@ func main() {
 		if errors.As(err, &invErr) && last != nil {
 			// Keep the previous results; only the health signal changes.
 			merged := *last
-			merged.CheckSuccess = snap.CheckSuccess
+			merged.CheckSuccess = make(map[string]bool, len(last.CheckSuccess)+1)
+			for k, v := range last.CheckSuccess {
+				merged.CheckSuccess[k] = v
+			}
+			merged.CheckSuccess["kubernetes"] = false
 			merged.StartedAt, merged.FinishedAt = snap.StartedAt, snap.FinishedAt
 			snap = &merged
 		}

@@ -46,7 +46,9 @@ const helmreleases = `{"metadata":{},"items":[
   "status":{"history":[{"chartVersion":"39.0.2","appVersion":"v3.6.1"},{"chartVersion":"39.0.1","appVersion":"v3.6.0"}]}},
  {"metadata":{"name":"metallb","namespace":"metallb"},
   "spec":{"chart":{"spec":{"chart":"metallb","version":"0.15.x","sourceRef":{"kind":"HelmRepository","name":"metallb"}}}},
-  "status":{}}]}`
+  "status":{}},
+ {"metadata":{"name":"cnpg","namespace":"cnpg-system"},
+  "spec":{"chartRef":{"kind":"OCIRepository","name":"x"}}}]}`
 
 const helmrepos = `{"metadata":{},"items":[
  {"metadata":{"name":"traefik","namespace":"flux-system"},"spec":{"url":"https://traefik.github.io/charts"}},
@@ -54,8 +56,15 @@ const helmrepos = `{"metadata":{},"items":[
 
 const fluxDeployments = `{"metadata":{},"items":[
  {"metadata":{"name":"odd","namespace":"flux-system","labels":{"foo":"bar"}}},
- {"metadata":{"name":"source-controller","namespace":"flux-system","labels":{"app.kubernetes.io/version":"v2.8.8"}}},
- {"metadata":{"name":"helm-controller","namespace":"flux-system","labels":{"app.kubernetes.io/version":"v9.9.9"}}}]}`
+ {"metadata":{"name":"bogus","namespace":"flux-system","labels":{"app.kubernetes.io/version":"v0.0.1"}}},
+ {"metadata":{"name":"source-controller","namespace":"flux-system","labels":{"app.kubernetes.io/part-of":"flux","app.kubernetes.io/version":"v2.8.8"}}},
+ {"metadata":{"name":"helm-controller","namespace":"flux-system","labels":{"app.kubernetes.io/part-of":"flux","app.kubernetes.io/version":"v9.9.9"}}}]}`
+
+const cnpgClusters = `{"metadata":{},"items":[
+ {"metadata":{"name":"pg-main","namespace":"db","labels":{"helm.toolkit.fluxcd.io/name":"pg"}},
+  "spec":{"imageName":"ghcr.io/cloudnative-pg/postgresql:17.5"},"status":{"image":"ghcr.io/cloudnative-pg/postgresql:17.6"}},
+ {"metadata":{"name":"pg-spec","namespace":"db"},"spec":{"imageName":"ghcr.io/cloudnative-pg/postgresql:16.9"}},
+ {"metadata":{"name":"pg-none","namespace":"db"},"spec":{}}]}`
 
 func fixtureHandler(t *testing.T, token string, hits *[]string) http.Handler {
 	routes := map[string]string{
@@ -63,6 +72,7 @@ func fixtureHandler(t *testing.T, token string, hits *[]string) http.Handler {
 		"/apis/apps/v1/statefulsets":                         statefulsets,
 		"/apis/apps/v1/daemonsets":                           daemonsets,
 		"/apis/batch/v1/cronjobs":                            cronjobs,
+		"/apis/postgresql.cnpg.io/v1/clusters":               cnpgClusters,
 		"/apis/helm.toolkit.fluxcd.io/v2/helmreleases":       helmreleases,
 		"/apis/source.toolkit.fluxcd.io/v1/helmrepositories": helmrepos,
 		"/apis/apps/v1/namespaces/flux-system/deployments":   fluxDeployments,
@@ -130,6 +140,8 @@ func TestInventory(t *testing.T) {
 		{"StatefulSet", "jellyfin", "jellyfin", "", []string{"jellyfin/jellyfin:12.2.0"}},
 		{"DaemonSet", "metallb", "speaker", "metallb", []string{"quay.io/metallb/speaker:v0.15.2"}},
 		{"CronJob", "shoko", "shoko-import", "", []string{"curlimages/curl:8.15.0", "alpine:3.22"}},
+		{"Cluster", "db", "pg-main", "pg", []string{"ghcr.io/cloudnative-pg/postgresql:17.6"}},
+		{"Cluster", "db", "pg-spec", "", []string{"ghcr.io/cloudnative-pg/postgresql:16.9"}},
 	}
 	if !reflect.DeepEqual(inv.Workloads, wantWL) {
 		t.Errorf("workloads = %+v", inv.Workloads)
@@ -140,6 +152,7 @@ func TestInventory(t *testing.T) {
 			SourceKind: "HelmRepository", SourceName: "traefik", SourceNamespace: "flux-system"},
 		{Namespace: "metallb", Name: "metallb", Chart: "metallb", SpecVersion: "0.15.x",
 			SourceKind: "HelmRepository", SourceName: "metallb", SourceNamespace: "metallb"},
+		{Namespace: "cnpg-system", Name: "cnpg", SourceNamespace: "cnpg-system", ChartRef: "OCIRepository"},
 	}
 	if !reflect.DeepEqual(inv.HelmReleases, wantHR) {
 		t.Errorf("helmreleases = %+v", inv.HelmReleases)
@@ -187,6 +200,84 @@ func TestInventoryFluxVersionMissing(t *testing.T) {
 		if inv.FluxVersion != "" {
 			t.Errorf("FluxVersion = %q", inv.FluxVersion)
 		}
+	}
+}
+
+func TestInventoryCNPGCRDMissing(t *testing.T) {
+	inner := fixtureHandler(t, "", nil)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/apis/postgresql.cnpg.io/v1/clusters" {
+			http.NotFound(w, r)
+			return
+		}
+		inner.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+	inv, err := New(srv.URL, srv.Client(), "").Inventory(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, w := range inv.Workloads {
+		if w.Kind == "Cluster" {
+			t.Errorf("unexpected Cluster workload %+v", w)
+		}
+	}
+	if len(inv.HelmReleases) == 0 {
+		t.Error("later reads skipped after 404")
+	}
+}
+
+func TestInventoryCNPGError(t *testing.T) {
+	inner := fixtureHandler(t, "", nil)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/apis/postgresql.cnpg.io/v1/clusters" {
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
+		}
+		inner.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+	if _, err := New(srv.URL, srv.Client(), "").Inventory(context.Background()); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestNewInClusterTokenRotation(t *testing.T) {
+	var seen []string
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Header.Get("Authorization"))
+		fmt.Fprint(w, `{"metadata":{},"items":[]}`)
+	}))
+	defer srv.Close()
+	host, port, _ := net.SplitHostPort(strings.TrimPrefix(srv.URL, "https://"))
+
+	old := saDir
+	defer func() { saDir = old }()
+	saDir = t.TempDir()
+	t.Setenv("KUBERNETES_SERVICE_HOST", host)
+	t.Setenv("KUBERNETES_SERVICE_PORT", port)
+	writeFile(t, saDir, "ca.crt", string(caPEM(srv)))
+
+	writeFile(t, saDir, "token", " \n")
+	if _, err := NewInCluster(); err == nil || !strings.Contains(err.Error(), "empty") {
+		t.Errorf("empty token: err = %v", err)
+	}
+
+	writeFile(t, saDir, "token", "tok-1\n")
+	c, err := NewInCluster()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.get(context.Background(), "/api/v1/nodes", nil); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, saDir, "token", "tok-2\n")
+	if _, err := c.get(context.Background(), "/api/v1/nodes", nil); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"Bearer tok-1", "Bearer tok-2"}
+	if !reflect.DeepEqual(seen, want) {
+		t.Errorf("Authorization headers = %v, want %v", seen, want)
 	}
 }
 

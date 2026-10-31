@@ -33,6 +33,7 @@ type HelmRelease struct {
 	SourceKind      string
 	SourceName      string
 	SourceNamespace string // defaults to the HelmRelease's namespace
+	ChartRef        string // .spec.chartRef.kind ("OCIRepository"/"HelmChart"), "" if unset
 }
 
 // HelmRepository is a Flux HelmRepository source.
@@ -156,6 +157,37 @@ func (c *Client) Inventory(ctx context.Context) (*Inventory, error) {
 		return nil, err
 	}
 
+	err = c.list(ctx, "/apis/postgresql.cnpg.io/v1/clusters", func(raw json.RawMessage) error {
+		var o struct {
+			Metadata objMeta `json:"metadata"`
+			Spec     struct {
+				ImageName string `json:"imageName"`
+			} `json:"spec"`
+			Status struct {
+				Image string `json:"image"`
+			} `json:"status"`
+		}
+		if err := json.Unmarshal(raw, &o); err != nil {
+			return err
+		}
+		img := o.Status.Image
+		if img == "" {
+			img = o.Spec.ImageName
+		}
+		if img == "" {
+			return nil
+		}
+		inv.Workloads = append(inv.Workloads, Workload{
+			Kind: "Cluster", Namespace: o.Metadata.Namespace, Name: o.Metadata.Name,
+			HelmRelease: o.Metadata.Labels[helmLabel], Images: []string{img},
+		})
+		return nil
+	})
+	var se *statusError
+	if err != nil && (!errors.As(err, &se) || se.status != http.StatusNotFound) {
+		return nil, err
+	}
+
 	err = c.list(ctx, "/apis/helm.toolkit.fluxcd.io/v2/helmreleases", func(raw json.RawMessage) error {
 		var o struct {
 			Metadata objMeta `json:"metadata"`
@@ -171,6 +203,9 @@ func (c *Client) Inventory(ctx context.Context) (*Inventory, error) {
 						} `json:"sourceRef"`
 					} `json:"spec"`
 				} `json:"chart"`
+				ChartRef struct {
+					Kind string `json:"kind"`
+				} `json:"chartRef"`
 			} `json:"spec"`
 			Status struct {
 				History []struct {
@@ -187,6 +222,7 @@ func (c *Client) Inventory(ctx context.Context) (*Inventory, error) {
 			Namespace: o.Metadata.Namespace, Name: o.Metadata.Name,
 			Chart: cs.Chart, SpecVersion: cs.Version,
 			SourceKind: cs.SourceRef.Kind, SourceName: cs.SourceRef.Name, SourceNamespace: cs.SourceRef.Namespace,
+			ChartRef: o.Spec.ChartRef.Kind,
 		}
 		if hr.SourceNamespace == "" {
 			hr.SourceNamespace = hr.Namespace
@@ -241,6 +277,9 @@ func (c *Client) fluxVersion(ctx context.Context) (string, error) {
 		}
 		if err := json.Unmarshal(raw, &o); err != nil {
 			return err
+		}
+		if o.Metadata.Labels["app.kubernetes.io/part-of"] != "flux" {
+			return nil
 		}
 		version = o.Metadata.Labels["app.kubernetes.io/version"]
 		return nil

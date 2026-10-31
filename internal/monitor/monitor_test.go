@@ -166,6 +166,8 @@ func inventory() *cluster.Inventory {
 		Workloads: []cluster.Workload{
 			{Kind: "Deployment", Namespace: "radarr", Name: "radarr", Images: []string{"lscr.io/linuxserver/radarr:6.1.1.10360-ls303"}},
 			{Kind: "StatefulSet", Namespace: "tandoor-recipes", Name: "postgres", Images: []string{"postgres:16.11-alpine3.23"}},
+			// Same repo, different tag, same EOL cycle: must not duplicate the eol series.
+			{Kind: "CronJob", Namespace: "tandoor-recipes", Name: "pg-backup", Images: []string{"postgres:16-alpine"}},
 			{Kind: "Deployment", Namespace: "monitoring", Name: "kube-prometheus-stack-grafana", HelmRelease: "kube-prometheus-stack",
 				Images: []string{"docker.io/grafana/grafana:13.2.5-distroless", "quay.io/kiwigrid/k8s-sidecar:2.14.1"}},
 			{Kind: "Deployment", Namespace: "beets", Name: "beets", Images: []string{"dmleet/beets-hermes:2.14.0-8fad9d3"}},
@@ -178,10 +180,15 @@ func inventory() *cluster.Inventory {
 	}
 }
 
+// byID indexes results by component ID (first occurrence wins — the same
+// repo at a second tag is a second result) and by "ID@tag".
 func byID(s *model.Snapshot) map[string]model.Result {
 	m := map[string]model.Result{}
 	for _, r := range s.Results {
-		m[r.ID()] = r
+		if _, dup := m[r.ID()]; !dup {
+			m[r.ID()] = r
+		}
+		m[r.ID()+"@"+r.Current] = r
 	}
 	return m
 }
@@ -236,6 +243,9 @@ func TestRun(t *testing.T) {
 	if r["image:tandoor-recipes/postgres"].Pinned != true {
 		t.Error("pinned postgres should be flagged Pinned")
 	}
+	if got := r["image:tandoor-recipes/postgres@16-alpine"]; got.Status != model.StatusNoMatch {
+		t.Errorf("second postgres tag should be its own result (nomatch: no '#-alpine' shaped candidates), got %+v", got)
+	}
 	if got := r["kubernetes:kubernetes"].Current; got != "v1.35.9" {
 		t.Errorf("kubernetes current should be the lowest node (v1.35.9), got %s", got)
 	}
@@ -277,6 +287,15 @@ func TestRun(t *testing.T) {
 	}
 	if e := eol["postgresql|tandoor-recipes/postgres"]; e.Cycle != "16" {
 		t.Errorf("postgres eol: %+v", e)
+	}
+	pgEOL := 0
+	for _, e := range snap.EOL {
+		if e.Product == "postgresql" && e.Namespace == "tandoor-recipes" {
+			pgEOL++
+		}
+	}
+	if pgEOL != 1 {
+		t.Errorf("postgres at two tags in one cycle produced %d eol results, want 1 (duplicate label sets fail the scrape)", pgEOL)
 	}
 	if _, ok := eol["nothing-runs-this|/"]; ok {
 		t.Error("a product nothing runs must produce no EOL result")

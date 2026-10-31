@@ -48,6 +48,7 @@ version_monitor_check_success{source="kubernetes"} 1
 version_monitor_check_success{source="registry:docker.io"} 0
 # HELP version_monitor_components Components seen in the last run, by kind and check status.
 # TYPE version_monitor_components gauge
+version_monitor_components{kind="eol",status="error"} 0
 version_monitor_components{kind="helmrelease",status="ok"} 1
 version_monitor_components{kind="image",status="error"} 1
 version_monitor_components{kind="image",status="ignored"} 1

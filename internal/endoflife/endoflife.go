@@ -74,7 +74,7 @@ func (c *Client) Product(ctx context.Context, name string) ([]model.Cycle, error
 		return nil, fmt.Errorf("endoflife: GET %s: unexpected HTTP status %d", u, resp.StatusCode)
 	}
 	var r response
-	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&r); err != nil {
 		return nil, fmt.Errorf("endoflife: decode %s (HTTP %d): %w", u, resp.StatusCode, err)
 	}
 	cycles := make([]model.Cycle, 0, len(r.Result.Releases))

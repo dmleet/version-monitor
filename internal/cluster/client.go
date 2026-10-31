@@ -33,6 +33,9 @@ type Client struct {
 	base  string
 	http  *http.Client
 	token string
+	// tokenFile, when set, is re-read on every request (projected
+	// ServiceAccount tokens are rotated by the kubelet) and wins over token.
+	tokenFile string
 }
 
 // New builds a client with an explicit base URL and HTTP client (for tests).
@@ -62,9 +65,13 @@ func NewInCluster() (*Client, error) {
 	if host == "" || port == "" {
 		return nil, errors.New("cluster: not running in a cluster: KUBERNETES_SERVICE_HOST / KUBERNETES_SERVICE_PORT not set")
 	}
-	tok, err := os.ReadFile(filepath.Join(saDir, "token"))
+	tokPath := filepath.Join(saDir, "token")
+	tok, err := os.ReadFile(tokPath)
 	if err != nil {
 		return nil, fmt.Errorf("cluster: reading ServiceAccount token: %w", err)
+	}
+	if strings.TrimSpace(string(tok)) == "" {
+		return nil, fmt.Errorf("cluster: ServiceAccount token %s is empty", tokPath)
 	}
 	caPath := filepath.Join(saDir, "ca.crt")
 	ca, err := os.ReadFile(caPath)
@@ -76,7 +83,9 @@ func NewInCluster() (*Client, error) {
 		return nil, fmt.Errorf("cluster: no valid certificates in %s", caPath)
 	}
 	base := "https://" + net.JoinHostPort(host, port)
-	return New(base, newHTTP(&tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}), strings.TrimSpace(string(tok))), nil
+	c := New(base, newHTTP(&tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}), strings.TrimSpace(string(tok)))
+	c.tokenFile = tokPath
+	return c, nil
 }
 
 type kubeconfig struct {
@@ -268,8 +277,19 @@ func (c *Client) get(ctx context.Context, path string, query url.Values) ([]byte
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "version-monitor")
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
+	token := c.token
+	if c.tokenFile != "" {
+		b, err := os.ReadFile(c.tokenFile)
+		if err != nil {
+			return nil, fmt.Errorf("GET %s: reading ServiceAccount token: %w", path, err)
+		}
+		token = strings.TrimSpace(string(b))
+		if token == "" {
+			return nil, fmt.Errorf("GET %s: ServiceAccount token %s is empty", path, c.tokenFile)
+		}
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {

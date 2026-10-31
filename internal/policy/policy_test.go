@@ -197,6 +197,10 @@ func TestMatchCycle(t *testing.T) {
 		{"1.3.0", k8s, "1.3", true},
 		{"13.2.5-distroless", grafana, "13.2", true},
 		{"13.9.0", grafana, "13", true},
+		{"8-alpine3.21", []model.Cycle{{Name: "8.0"}, {Name: "8.1"}, {Name: "8.3"}, {Name: "8"}}, "8", true},
+		{"8-alpine3.21", []model.Cycle{{Name: "8.0"}, {Name: "8.1"}, {Name: "8.3"}}, "", false},
+		{"v1.35.10", []model.Cycle{{Name: "1.3"}, {Name: "1.35"}}, "1.35", true},
+		{"1.35.10", []model.Cycle{{Name: "1.3"}}, "", false},
 		{"15.0", pg, "", false},
 		{"", pg, "", false},
 	}

@@ -19,7 +19,7 @@ import (
 type Client struct {
 	HTTP           *http.Client // required; caller sets timeouts
 	UserAgent      string       // default "version-monitor"
-	MaxPages       int          // OCI/quay page cap, default 20
+	MaxPages       int          // OCI/quay page cap, default 30
 	DockerHubPages int          // default 5
 	HubBase        string       // default "https://hub.docker.com"
 	QuayBase       string       // default "https://quay.io"
@@ -34,7 +34,7 @@ func New(httpClient *http.Client) *Client {
 	return &Client{
 		HTTP:           httpClient,
 		UserAgent:      "version-monitor",
-		MaxPages:       20,
+		MaxPages:       30,
 		DockerHubPages: 5,
 		HubBase:        "https://hub.docker.com",
 		QuayBase:       "https://quay.io",
@@ -45,7 +45,7 @@ func (c *Client) maxPages() int {
 	if c.MaxPages > 0 {
 		return c.MaxPages
 	}
-	return 20
+	return 30
 }
 
 func (c *Client) hubPages() int {
@@ -120,6 +120,9 @@ func (e *statusError) Error() string {
 	return fmt.Sprintf("HTTP %d from %s: %s", e.Status, e.URL, e.Body)
 }
 
+// maxBody bounds every response body read.
+const maxBody = 32 << 20
+
 func (c *Client) get(ctx context.Context, u string, hdr map[string]string) ([]byte, http.Header, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
@@ -134,9 +137,12 @@ func (c *Client) get(ctx context.Context, u string, hdr map[string]string) ([]by
 		return nil, nil, fmt.Errorf("GET %s: %w", u, err)
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
 	if err != nil {
 		return nil, nil, fmt.Errorf("reading %s: %w", u, err)
+	}
+	if len(body) > maxBody {
+		return nil, nil, fmt.Errorf("response from %s exceeds %d bytes", u, maxBody)
 	}
 	if resp.StatusCode != http.StatusOK {
 		s := string(body)
@@ -202,10 +208,10 @@ func (c *Client) quayTags(ctx context.Context, path string) ([]string, error) {
 			tags = append(tags, t.Name)
 		}
 		if !r.HasAdditional {
-			break
+			return tags, nil
 		}
 	}
-	return tags, nil
+	return nil, fmt.Errorf("more than %d pages; raise MaxPages or use a github_releases override", c.maxPages())
 }
 
 func (c *Client) baseFor(host string) string {
@@ -217,9 +223,13 @@ func (c *Client) baseFor(host string) string {
 
 func (c *Client) ociTags(ctx context.Context, host, path string) ([]string, error) {
 	next := fmt.Sprintf("%s/v2/%s/tags/list?n=1000", c.baseFor(host), path)
+	first, err := url.Parse(next)
+	if err != nil {
+		return nil, fmt.Errorf("parsing %s: %w", next, err)
+	}
 	var tags []string
 	var token string
-	for page := 0; page < c.maxPages() && next != ""; page++ {
+	for page := 0; page < c.maxPages(); page++ {
 		hdr := map[string]string{"Accept": "application/json"}
 		if token != "" {
 			hdr["Authorization"] = "Bearer " + token
@@ -246,7 +256,7 @@ func (c *Client) ociTags(ctx context.Context, host, path string) ([]string, erro
 		tags = append(tags, r.Tags...)
 		link := nextLink(h.Get("Link"))
 		if link == "" {
-			break
+			return tags, nil
 		}
 		base, err := url.Parse(next)
 		if err != nil {
@@ -256,9 +266,14 @@ func (c *Client) ociTags(ctx context.Context, host, path string) ([]string, erro
 		if err != nil {
 			return nil, fmt.Errorf("parsing Link %q from %s: %w", link, next, err)
 		}
-		next = base.ResolveReference(ref).String()
+		resolved := base.ResolveReference(ref)
+		if resolved.Scheme != first.Scheme || resolved.Host != first.Host {
+			return nil, fmt.Errorf("next Link %q points at unexpected host %s://%s (registry is %s://%s)",
+				link, resolved.Scheme, resolved.Host, first.Scheme, first.Host)
+		}
+		next = resolved.String()
 	}
-	return tags, nil
+	return nil, fmt.Errorf("more than %d pages; raise MaxPages or use a github_releases override", c.maxPages())
 }
 
 // nextLink extracts the target of a rel="next" Link header value.
@@ -295,7 +310,11 @@ func (c *Client) fetchToken(ctx context.Context, challenge, path string) (string
 	if err != nil {
 		return "", fmt.Errorf("bad realm %q: %w", realm, err)
 	}
-	if ov, ok := c.HostOverride[ru.Host]; ok {
+	ov, overridden := c.HostOverride[ru.Host]
+	if ru.Scheme != "https" && !overridden {
+		return "", fmt.Errorf("refusing token realm %q: scheme must be https (host %s is not overridden)", realm, ru.Host)
+	}
+	if overridden {
 		ou, err := url.Parse(ov)
 		if err != nil {
 			return "", fmt.Errorf("bad host override %q: %w", ov, err)

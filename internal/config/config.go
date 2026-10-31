@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -36,6 +37,8 @@ type Config struct {
 	Overrides map[string]Override `yaml:"overrides"`
 	// ExcludeNamespaces are never scanned for images (lines-behind or EOL).
 	ExcludeNamespaces []string `yaml:"exclude_namespaces"`
+
+	globs map[string]*regexp.Regexp // compiled override keys, built by Parse
 }
 
 // Defaults apply to every component unless overridden.
@@ -186,8 +189,8 @@ func Parse(b []byte) (*Config, error) {
 		if o.MaxLinesBehind != nil && *o.MaxLinesBehind < 0 {
 			return nil, fmt.Errorf("config: overrides[%q].max_lines_behind must be >= 0", k)
 		}
-		if o.GitHubReleases != "" && !strings.Contains(o.GitHubReleases, "/") {
-			return nil, fmt.Errorf("config: overrides[%q].github_releases must be \"owner/repo\"", k)
+		if o.GitHubReleases != "" && !githubRepo.MatchString(strings.ReplaceAll(o.GitHubReleases, "{name}", "x")) {
+			return nil, fmt.Errorf("config: overrides[%q].github_releases must be \"owner/repo\" (letters, digits, . _ -)", k)
 		}
 		if o.TagRegex != "" {
 			re, err := regexp.Compile(o.TagRegex)
@@ -201,8 +204,14 @@ func Parse(b []byte) (*Config, error) {
 			c.Overrides[k] = o
 		}
 	}
+	c.globs = make(map[string]*regexp.Regexp, len(c.Overrides))
+	for k := range c.Overrides {
+		c.globs[k] = globRE(k)
+	}
 	return &c, nil
 }
+
+var githubRepo = regexp.MustCompile(`^[\w.-]+/[\w.-]+$`)
 
 func validUnit(u Unit) error {
 	switch u {
@@ -225,16 +234,18 @@ func (c *Config) Resolve(comp model.Component) Resolved {
 	}
 	var hits []hit
 	for k, o := range c.Overrides {
-		if Match(k, comp) {
+		if c.match(k, comp) {
 			hits = append(hits, hit{k, o})
 		}
 	}
-	// Shortest first so longer keys overwrite.
-	for i := 1; i < len(hits); i++ {
-		for j := i; j > 0 && len(hits[j].key) < len(hits[j-1].key); j-- {
-			hits[j], hits[j-1] = hits[j-1], hits[j]
+	// Shortest first so longer keys overwrite; equal lengths by key so the
+	// result never depends on map order.
+	sort.Slice(hits, func(i, j int) bool {
+		if len(hits[i].key) != len(hits[j].key) {
+			return len(hits[i].key) < len(hits[j].key)
 		}
-	}
+		return hits[i].key < hits[j].key
+	})
 	for _, h := range hits {
 		if h.o.Unit != "" {
 			r.Unit = h.o.Unit
@@ -262,8 +273,22 @@ func (c *Config) Resolve(comp model.Component) Resolved {
 	return r
 }
 
-// Match reports whether an override key applies to a component.
+// Match reports whether an override key applies to a component. Keys are
+// matched against every kind: "postgres" matches an image repository
+// named postgres and a HelmRelease named postgres alike.
 func Match(key string, comp model.Component) bool {
+	return matchRE(globRE(key), comp)
+}
+
+func (c *Config) match(key string, comp model.Component) bool {
+	re, ok := c.globs[key]
+	if !ok {
+		re = globRE(key)
+	}
+	return matchRE(re, comp)
+}
+
+func matchRE(re *regexp.Regexp, comp model.Component) bool {
 	candidates := []string{comp.Name}
 	if comp.Namespace != "" {
 		candidates = append(candidates, comp.Namespace+"/"+comp.Name)
@@ -271,7 +296,6 @@ func Match(key string, comp model.Component) bool {
 	if comp.Kind == model.KindImage && comp.Source.Image != "" && comp.Source.Image != comp.Name {
 		candidates = append(candidates, comp.Source.Image)
 	}
-	re := globRE(key)
 	for _, s := range candidates {
 		if re.MatchString(s) {
 			return true
@@ -280,12 +304,7 @@ func Match(key string, comp model.Component) bool {
 	return false
 }
 
-var globCache = map[string]*regexp.Regexp{}
-
 func globRE(glob string) *regexp.Regexp {
-	if re, ok := globCache[glob]; ok {
-		return re
-	}
 	var sb strings.Builder
 	sb.WriteString("^")
 	for i, part := range strings.Split(glob, "*") {
@@ -295,9 +314,7 @@ func globRE(glob string) *regexp.Regexp {
 		sb.WriteString(regexp.QuoteMeta(part))
 	}
 	sb.WriteString("$")
-	re := regexp.MustCompile(sb.String())
-	globCache[glob] = re
-	return re
+	return regexp.MustCompile(sb.String())
 }
 
 // Excluded reports whether a namespace is excluded from image scanning.

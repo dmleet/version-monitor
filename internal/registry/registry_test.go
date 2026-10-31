@@ -100,8 +100,7 @@ func TestQuayPagination(t *testing.T) {
 }
 
 func TestOCIAuthAndPaginationWithLSCRAlias(t *testing.T) {
-	var srv *httptest.Server
-	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/token":
 			if r.URL.Query().Get("service") != "ghcr.io" || r.URL.Query().Get("scope") != "repository:linuxserver/radarr:pull" {
@@ -110,7 +109,7 @@ func TestOCIAuthAndPaginationWithLSCRAlias(t *testing.T) {
 			fmt.Fprint(w, `{"token":"sekret"}`)
 		case "/v2/linuxserver/radarr/tags/list":
 			if r.Header.Get("Authorization") != "Bearer sekret" {
-				w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer realm="%s/token",service="ghcr.io",scope="repository:linuxserver/radarr:pull"`, srv.URL))
+				w.Header().Set("WWW-Authenticate", `Bearer realm="https://ghcr.io/token",service="ghcr.io",scope="repository:linuxserver/radarr:pull"`)
 				w.WriteHeader(http.StatusUnauthorized)
 				return
 			}
@@ -150,5 +149,82 @@ func TestOCIAnonymous(t *testing.T) {
 	got, err := c.Tags(context.Background(), "registry.k8s.io/kube-apiserver")
 	if err != nil || !slices.Equal(got, []string{"v1.35.10"}) {
 		t.Errorf("got %v, %v", got, err)
+	}
+}
+
+func TestOCIPageCapErrors(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Link", `</v2/foo/tags/list?n=1000&last=x>; rel="next"`)
+		fmt.Fprint(w, `{"tags":["1"]}`)
+	}))
+	defer srv.Close()
+	c := New(srv.Client())
+	c.MaxPages = 2
+	c.HostOverride = map[string]string{"reg.example": srv.URL}
+	_, err := c.Tags(context.Background(), "reg.example/foo")
+	if err == nil || !strings.Contains(err.Error(), "more than 2 pages") {
+		t.Errorf("err = %v, want page cap error", err)
+	}
+}
+
+func TestQuayPageCapErrors(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"tags":[{"name":"v1"}],"has_additional":true}`)
+	}))
+	defer srv.Close()
+	c := New(srv.Client())
+	c.MaxPages = 2
+	c.QuayBase = srv.URL
+	_, err := c.Tags(context.Background(), "quay.io/a/b")
+	if err == nil || !strings.Contains(err.Error(), "more than 2 pages") {
+		t.Errorf("err = %v, want page cap error", err)
+	}
+}
+
+func TestOCIRejectsOffHostNextLink(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Link", `<http://evil.example/v2/foo/tags/list?last=x>; rel="next"`)
+		fmt.Fprint(w, `{"tags":["1"]}`)
+	}))
+	defer srv.Close()
+	c := New(srv.Client())
+	c.HostOverride = map[string]string{"reg.example": srv.URL}
+	_, err := c.Tags(context.Background(), "reg.example/foo")
+	if err == nil || !strings.Contains(err.Error(), "evil.example") {
+		t.Errorf("err = %v, want unexpected host error", err)
+	}
+}
+
+func TestOCIRejectsInsecureRealm(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="http://auth.example/token",service="x"`)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+	c := New(srv.Client())
+	c.HostOverride = map[string]string{"reg.example": srv.URL}
+	_, err := c.Tags(context.Background(), "reg.example/foo")
+	if err == nil || !strings.Contains(err.Error(), "https") {
+		t.Errorf("err = %v, want https realm error", err)
+	}
+}
+
+func TestOversizedBodyFails(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"tags":["`))
+		buf := make([]byte, 1<<20)
+		for i := range buf {
+			buf[i] = 'a'
+		}
+		for range 33 {
+			_, _ = w.Write(buf)
+		}
+	}))
+	defer srv.Close()
+	c := New(srv.Client())
+	c.HostOverride = map[string]string{"reg.example": srv.URL}
+	_, err := c.Tags(context.Background(), "reg.example/foo")
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Errorf("err = %v, want size error", err)
 	}
 }

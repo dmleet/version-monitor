@@ -119,6 +119,16 @@ func (m *Monitor) Run(ctx context.Context) (*model.Snapshot, error) {
 	for src, ok := range f.success {
 		snap.CheckSuccess[src] = ok
 	}
+	for _, r := range snap.Results {
+		if r.Err != nil {
+			log.Warn("component check failed", "component", r.ID(), "current", r.Current, "err", r.Err)
+		}
+	}
+	for _, e := range snap.EOL {
+		if e.Err != nil {
+			log.Warn("eol lookup failed", "product", e.Product, "kind", e.Kind, "namespace", e.Namespace, "name", e.Name, "version", e.Version, "err", e.Err)
+		}
+	}
 	sort.Slice(snap.Results, func(i, j int) bool { return snap.Results[i].ID() < snap.Results[j].ID() })
 	sort.Slice(snap.EOL, func(i, j int) bool {
 		a, b := snap.EOL[i], snap.EOL[j]
@@ -148,6 +158,7 @@ func (m *Monitor) components(inv *cluster.Inventory, log *slog.Logger) []model.C
 		if c.Current == "" {
 			c.Current = hr.SpecVersion
 		}
+		c.Source.ChartRef = hr.ChartRef
 		if hr.SourceKind == "HelmRepository" {
 			if r, ok := repos[hr.SourceNamespace+"/"+hr.SourceName]; ok {
 				c.Source.HelmRepoName = r.Name
@@ -188,7 +199,7 @@ func (m *Monitor) components(inv *cluster.Inventory, log *slog.Logger) []model.C
 
 	var kube, talos string
 	for _, n := range inv.Nodes {
-		if kube == "" || policyLess(n.KubeletVersion, kube) {
+		if n.KubeletVersion != "" && (kube == "" || policyLess(n.KubeletVersion, kube)) {
 			kube = n.KubeletVersion
 		}
 		if mm := talosRE.FindStringSubmatch(n.OSImage); mm != nil {
@@ -216,13 +227,7 @@ func (m *Monitor) components(inv *cluster.Inventory, log *slog.Logger) []model.C
 
 // policyLess reports a < b by numeric components (lowest node wins).
 func policyLess(a, b string) bool {
-	va, vb := policy.Parse(strings.TrimPrefix(a, "v")).Nums, policy.Parse(strings.TrimPrefix(b, "v")).Nums
-	for i := 0; i < len(va) && i < len(vb); i++ {
-		if va[i] != vb[i] {
-			return va[i] < vb[i]
-		}
-	}
-	return len(va) < len(vb)
+	return policy.Compare(policy.Parse(strings.TrimPrefix(a, "v")).Nums, policy.Parse(strings.TrimPrefix(b, "v")).Nums) < 0
 }
 
 // check applies the policy to one component using fetched candidates.
@@ -239,7 +244,15 @@ func (m *Monitor) check(c model.Component, f *fetchCache) model.Result {
 	switch c.Kind {
 	case model.KindHelmRelease:
 		if c.Source.HelmRepoURL == "" {
-			r.Status, r.Err = model.StatusError, fmt.Errorf("HelmRepository %q not found or not an HTTP repository", c.Source.HelmRepoName)
+			switch {
+			case c.Source.ChartRef != "":
+				r.Err = fmt.Errorf("spec.chartRef (%s) is not supported; only HelmRepository sources are checked", c.Source.ChartRef)
+			case c.Source.HelmRepoName == "":
+				r.Err = fmt.Errorf("sourceRef HelmRepository not found")
+			default:
+				r.Err = fmt.Errorf("HelmRepository %q is an OCI repository; only HTTP index repositories are checked", c.Source.HelmRepoName)
+			}
+			r.Status = model.StatusError
 			return r
 		}
 		var idx *helmindex.Index
@@ -256,14 +269,15 @@ func (m *Monitor) check(c model.Component, f *fetchCache) model.Result {
 			}
 		}
 	case model.KindImage:
-		if res.TagRegex == nil && !policy.Trackable(c.Current) {
+		k, ok := imageFetch(c, res)
+		if !ok {
 			r.Status = model.StatusSkipped
 			return r
 		}
-		if res.GitHubReleases != "" {
-			cands, err = f.releases(res.GitHubReleases)
+		if k.kind == "gh" {
+			cands, err = f.releases(k.arg)
 		} else {
-			cands, err = f.tags(c.Source.Image)
+			cands, err = f.tags(k.arg)
 		}
 	case model.KindKubernetes:
 		var cycles []model.Cycle
@@ -359,6 +373,10 @@ func (m *Monitor) observe(comps []model.Component) (map[string][]observation, []
 // eol matches every observed version to its product's cycles.
 func (m *Monitor) eol(observed map[string][]observation, f *fetchCache) []model.EOLResult {
 	var out []model.EOLResult
+	// One series per (product, cycle, kind, namespace, name): the same repo
+	// at two tags in one namespace that land in the same cycle would
+	// otherwise emit duplicate label sets and fail the whole scrape.
+	seen := map[string]bool{}
 	for product, obs := range observed {
 		cycles, err := f.product(product)
 		for _, o := range obs {
@@ -375,6 +393,11 @@ func (m *Monitor) eol(observed map[string][]observation, f *fetchCache) []model.
 				continue
 			}
 			r.Cycle = cy.Name
+			key := strings.Join([]string{product, r.Cycle, string(r.Kind), r.Namespace, r.Name}, "|")
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
 			if cy.EOL != nil {
 				r.HasEOL, r.EOL = true, *cy.EOL
 			}
@@ -421,20 +444,27 @@ func (f *fetchCache) want(c model.Component) {
 			f.keys["helm:"+c.Source.HelmRepoURL] = fetchKey{"helm", c.Source.HelmRepoURL, c.SourceID()}
 		}
 	case model.KindImage:
-		res := f.m.Config.Resolve(c)
-		if !policy.Trackable(c.Current) && res.TagRegex == nil {
-			return
+		if k, ok := imageFetch(c, f.m.Config.Resolve(c)); ok {
+			f.keys[k.kind+":"+k.arg] = k
 		}
-		if res.GitHubReleases != "" {
-			f.keys["gh:"+res.GitHubReleases] = fetchKey{"gh", res.GitHubReleases, "github"}
-			return
-		}
-		f.keys["tags:"+c.Source.Image] = fetchKey{"tags", c.Source.Image, c.SourceID()}
 	case model.KindKubernetes:
 		f.wantProduct(c.Source.EndOfLifeProduct)
 	case model.KindTalos, model.KindFlux:
 		f.keys["gh:"+c.Source.GitHubRepo] = fetchKey{"gh", c.Source.GitHubRepo, "github"}
 	}
+}
+
+// imageFetch decides where an image's candidates come from — the single
+// place for that decision, used both when planning fetches and when
+// checking. ok is false when the tag is not a version we can compare.
+func imageFetch(c model.Component, res config.Resolved) (fetchKey, bool) {
+	if !policy.Trackable(c.Current) && res.TagRegex == nil {
+		return fetchKey{}, false
+	}
+	if res.GitHubReleases != "" {
+		return fetchKey{"gh", res.GitHubReleases, "github"}, true
+	}
+	return fetchKey{"tags", c.Source.Image, c.SourceID()}, true
 }
 
 func (f *fetchCache) wantProduct(p string) {
@@ -451,6 +481,10 @@ func (f *fetchCache) run(ctx context.Context, concurrency int) {
 		}
 	}
 	sem := make(chan struct{}, concurrency)
+	// Chart indexes are decoded whole by yaml.v3 (~12x the file size in
+	// heap; prometheus-community's is 6.6 MB). One at a time keeps the
+	// peak bounded regardless of how many repos there are.
+	helmSem := make(chan struct{}, 1)
 	var wg sync.WaitGroup
 	for _, k := range f.keys {
 		wg.Add(1)
@@ -458,6 +492,10 @@ func (f *fetchCache) run(ctx context.Context, concurrency int) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
+			if k.kind == "helm" {
+				helmSem <- struct{}{}
+				defer func() { <-helmSem }()
+			}
 			start := time.Now()
 			var err error
 			switch k.kind {

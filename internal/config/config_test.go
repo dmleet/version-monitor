@@ -74,21 +74,37 @@ func TestParseAndResolve(t *testing.T) {
 
 func TestParseErrors(t *testing.T) {
 	bad := map[string]string{
-		"unknown field":                 "defaults: {unit: minor}\nbogus: 1\n",
-		"bad unit":                      "defaults: {unit: patch}\n",
-		"bad pin":                       "overrides:\n  x: {pin: minor}\n",
-		"regex without v":               "overrides:\n  x: {tag_regex: '^\\d+$'}\n",
-		"eol two sources":               "eol:\n  - {product: x, source: flux, image: y}\n",
-		"eol bad source":                "eol:\n  - {product: x, source: nodes}\n",
-		"eol bad helmrelease":           "eol:\n  - {product: x, helmrelease: longhorn}\n",
-		"interval too short":            "interval: 10s\n",
-		"github_releases without owner": "overrides:\n  x: {github_releases: radarr}\n",
+		"unknown field":                   "defaults: {unit: minor}\nbogus: 1\n",
+		"bad unit":                        "defaults: {unit: patch}\n",
+		"bad pin":                         "overrides:\n  x: {pin: minor}\n",
+		"regex without v":                 "overrides:\n  x: {tag_regex: '^\\d+$'}\n",
+		"eol two sources":                 "eol:\n  - {product: x, source: flux, image: y}\n",
+		"eol bad source":                  "eol:\n  - {product: x, source: nodes}\n",
+		"eol bad helmrelease":             "eol:\n  - {product: x, helmrelease: longhorn}\n",
+		"interval too short":              "interval: 10s\n",
+		"github_releases without owner":   "overrides:\n  x: {github_releases: radarr}\n",
+		"github_releases with path chars": "overrides:\n  x: {github_releases: \"a/b/../c\"}\n",
 	}
 	for name, src := range bad {
 		if _, err := Parse([]byte(src)); err == nil {
 			t.Errorf("%s: expected error", name)
 		} else if !strings.HasPrefix(err.Error(), "config:") {
 			t.Errorf("%s: error not prefixed: %v", name, err)
+		}
+	}
+}
+
+func TestResolveTieBreakIsDeterministic(t *testing.T) {
+	src := "overrides:\n  \"a*\": {unit: major}\n  \"*b\": {unit: minor}\n"
+	comp := model.Component{Kind: model.KindImage, Name: "ab", Source: model.Source{Image: "ab"}}
+	for i := 0; i < 50; i++ {
+		c, err := Parse([]byte(src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		// equal length keys: "a*" < "*b" is false ('*' sorts before 'a'), so "*b" applies first and "a*" wins
+		if r := c.Resolve(comp); r.Unit != UnitMajor {
+			t.Fatalf("iteration %d: unit = %s, want major", i, r.Unit)
 		}
 	}
 }
