@@ -71,6 +71,11 @@ type Override struct {
 	Pin            string `yaml:"pin,omitempty"`       // "major": only candidates sharing the current major
 	Ignore         bool   `yaml:"ignore,omitempty"`    // skip the component entirely
 	TagRegex       string `yaml:"tag_regex,omitempty"` // must define a named group `v`
+	// GitHubReleases makes an image's candidate versions come from the
+	// release tags of a GitHub repo instead of the registry's tag list.
+	// "{name}" expands to the last path segment of the image repository
+	// ("linuxserver/docker-{name}" for lscr.io/linuxserver/radarr).
+	GitHubReleases string `yaml:"github_releases,omitempty"`
 	tagRE          *regexp.Regexp
 }
 
@@ -101,6 +106,7 @@ type Resolved struct {
 	PinMajor       bool
 	Ignore         bool
 	TagRegex       *regexp.Regexp // nil when unset
+	GitHubReleases string         // "owner/repo" or "" for the registry
 }
 
 // Load reads and validates a config file.
@@ -180,6 +186,9 @@ func Parse(b []byte) (*Config, error) {
 		if o.MaxLinesBehind != nil && *o.MaxLinesBehind < 0 {
 			return nil, fmt.Errorf("config: overrides[%q].max_lines_behind must be >= 0", k)
 		}
+		if o.GitHubReleases != "" && !strings.Contains(o.GitHubReleases, "/") {
+			return nil, fmt.Errorf("config: overrides[%q].github_releases must be \"owner/repo\"", k)
+		}
 		if o.TagRegex != "" {
 			re, err := regexp.Compile(o.TagRegex)
 			if err != nil {
@@ -241,6 +250,13 @@ func (c *Config) Resolve(comp model.Component) Resolved {
 		}
 		if h.o.tagRE != nil {
 			r.TagRegex = h.o.tagRE
+		}
+		if h.o.GitHubReleases != "" {
+			name := comp.Name
+			if i := strings.LastIndex(name, "/"); i >= 0 {
+				name = name[i+1:]
+			}
+			r.GitHubReleases = strings.ReplaceAll(h.o.GitHubReleases, "{name}", name)
 		}
 	}
 	return r

@@ -20,7 +20,7 @@ eol:
 overrides:
   kube-prometheus-stack: {unit: major}
   "tandoor-recipes/postgres": {unit: major, pin: major}
-  "lscr.io/linuxserver/*": {tag_regex: '^(?P<v>\d+\.\d+\.\d+\.\d+)-ls\d+$'}
+  "lscr.io/linuxserver/*": {tag_regex: '^(?P<v>\d+\.\d+\.\d+\.\d+)-ls\d+$', github_releases: "linuxserver/docker-{name}"}
   "lscr.io/linuxserver/sonarr": {max_lines_behind: 3}
   "dmleet/*": {ignore: true}
 `
@@ -59,7 +59,7 @@ func TestParseAndResolve(t *testing.T) {
 		t.Errorf("override leaked to another namespace: %+v", r)
 	}
 	radarr := model.Component{Kind: model.KindImage, Namespace: "radarr", Name: "lscr.io/linuxserver/radarr", Source: model.Source{Image: "lscr.io/linuxserver/radarr"}}
-	if r := c.Resolve(radarr); r.TagRegex == nil || r.MaxLinesBehind != 1 {
+	if r := c.Resolve(radarr); r.TagRegex == nil || r.MaxLinesBehind != 1 || r.GitHubReleases != "linuxserver/docker-radarr" {
 		t.Errorf("radarr resolve: %+v", r)
 	}
 	sonarr := model.Component{Kind: model.KindImage, Namespace: "sonarr", Name: "lscr.io/linuxserver/sonarr", Source: model.Source{Image: "lscr.io/linuxserver/sonarr"}}
@@ -74,14 +74,15 @@ func TestParseAndResolve(t *testing.T) {
 
 func TestParseErrors(t *testing.T) {
 	bad := map[string]string{
-		"unknown field":       "defaults: {unit: minor}\nbogus: 1\n",
-		"bad unit":            "defaults: {unit: patch}\n",
-		"bad pin":             "overrides:\n  x: {pin: minor}\n",
-		"regex without v":     "overrides:\n  x: {tag_regex: '^\\d+$'}\n",
-		"eol two sources":     "eol:\n  - {product: x, source: flux, image: y}\n",
-		"eol bad source":      "eol:\n  - {product: x, source: nodes}\n",
-		"eol bad helmrelease": "eol:\n  - {product: x, helmrelease: longhorn}\n",
-		"interval too short":  "interval: 10s\n",
+		"unknown field":                 "defaults: {unit: minor}\nbogus: 1\n",
+		"bad unit":                      "defaults: {unit: patch}\n",
+		"bad pin":                       "overrides:\n  x: {pin: minor}\n",
+		"regex without v":               "overrides:\n  x: {tag_regex: '^\\d+$'}\n",
+		"eol two sources":               "eol:\n  - {product: x, source: flux, image: y}\n",
+		"eol bad source":                "eol:\n  - {product: x, source: nodes}\n",
+		"eol bad helmrelease":           "eol:\n  - {product: x, helmrelease: longhorn}\n",
+		"interval too short":            "interval: 10s\n",
+		"github_releases without owner": "overrides:\n  x: {github_releases: radarr}\n",
 	}
 	for name, src := range bad {
 		if _, err := Parse([]byte(src)); err == nil {
